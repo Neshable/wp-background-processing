@@ -1,9 +1,12 @@
 <?php
 /**
- * WP Background Process
+ * WP Background Process via Redis
  *
  * @package WP-Background-Processing
  */
+
+require_once 'wp-async-request.php';
+require_once 'predis/autoload.php';
 
 if ( ! class_exists( 'WP_Background_Process' ) ) {
 
@@ -13,6 +16,7 @@ if ( ! class_exists( 'WP_Background_Process' ) ) {
 	 * @abstract
 	 * @extends WP_Async_Request
 	 */
+	
 	abstract class WP_Background_Process extends WP_Async_Request {
 
 		/**
@@ -34,6 +38,22 @@ if ( ! class_exists( 'WP_Background_Process' ) ) {
 		 * @access protected
 		 */
 		protected $start_time = 0;
+
+		/**
+		 * Init Redis client
+		 *
+		 * @var int
+		 * @access protected
+		 */
+		protected $redis_client;
+
+		/**
+		 * Redis connection details
+		 *
+		 * @var arr
+		 * @access protected
+		 */
+		protected $redis_connection;
 
 		/**
 		 * Cron_hook_identifier
@@ -60,8 +80,39 @@ if ( ! class_exists( 'WP_Background_Process' ) ) {
 			$this->cron_hook_identifier     = $this->identifier . '_cron';
 			$this->cron_interval_identifier = $this->identifier . '_cron_interval';
 
-			add_action( $this->cron_hook_identifier, array( $this, 'handle_cron_healthcheck' ) );
+			// Init redis
+			Predis\Autoloader::register();
+
+			$this->redis_connection = array(
+				'scheme' => 'tcp',
+				'host'   => '192.0.0.1', // Your host IP Address
+				'port'   => 6379 // The default port is 6379
+			);
+
+			$this->redis_client = $this->init_redis();
+
+			// Add new interval to default WP cron schedules
 			add_filter( 'cron_schedules', array( $this, 'schedule_cron_healthcheck' ) );
+
+			add_action( $this->cron_hook_identifier, array( $this, 'handle_cron_healthcheck' ) );
+		}
+
+		/**
+		 * Init redis client
+		 *
+		 * @access public
+		 * @return void
+		 */
+		public function init_redis() {
+			try {
+				$redis = new Predis\Client( $this->redis_connection );
+			} catch ( Exception $e ) {
+				$redis = $e->getMessage();
+				die( $redis );
+			}
+
+			// Perform remote post.
+			return $redis;
 		}
 
 		/**
@@ -100,7 +151,8 @@ if ( ! class_exists( 'WP_Background_Process' ) ) {
 			$key = $this->generate_key();
 
 			if ( ! empty( $this->data ) ) {
-				update_site_option( $key, $this->data );
+				$this->redis_client->set( $key, json_encode( $this->data ) );
+				$this->redis_client->expire( $key, 3600 );
 			}
 
 			return $this;
@@ -116,7 +168,7 @@ if ( ! class_exists( 'WP_Background_Process' ) ) {
 		 */
 		public function update( $key, $data ) {
 			if ( ! empty( $data ) ) {
-				update_site_option( $key, $data );
+				$this->redis_client->set( $key, json_encode( $data ) );
 			}
 
 			return $this;
@@ -130,7 +182,8 @@ if ( ! class_exists( 'WP_Background_Process' ) ) {
 		 * @return $this
 		 */
 		public function delete( $key ) {
-			delete_site_option( $key );
+
+			$this->redis_client->del( $key );
 
 			return $this;
 		}
@@ -185,25 +238,10 @@ if ( ! class_exists( 'WP_Background_Process' ) ) {
 		 * @return bool
 		 */
 		protected function is_queue_empty() {
-			global $wpdb;
 
-			$table  = $wpdb->options;
-			$column = 'option_name';
+			$arList = $this->redis_client->keys( $this->identifier . '_batch_*' );
 
-			if ( is_multisite() ) {
-				$table  = $wpdb->sitemeta;
-				$column = 'meta_key';
-			}
-
-			$key = $wpdb->esc_like( $this->identifier . '_batch_' ) . '%';
-
-			$count = $wpdb->get_var( $wpdb->prepare( "
-			SELECT COUNT(*)
-			FROM {$table}
-			WHERE {$column} LIKE %s
-		", $key ) );
-
-			return ( $count > 0 ) ? false : true;
+			return ( empty( $arList ) ) ? true : false;
 		}
 
 		/**
@@ -245,6 +283,7 @@ if ( ! class_exists( 'WP_Background_Process' ) ) {
 		 * @return $this
 		 */
 		protected function unlock_process() {
+			
 			delete_site_transient( $this->identifier . '_process_lock' );
 
 			return $this;
@@ -256,33 +295,13 @@ if ( ! class_exists( 'WP_Background_Process' ) ) {
 		 * @return stdClass Return the first batch from the queue
 		 */
 		protected function get_batch() {
-			global $wpdb;
 
-			$table        = $wpdb->options;
-			$column       = 'option_name';
-			$key_column   = 'option_id';
-			$value_column = 'option_value';
+			$arList = $this->redis_client->keys( $this->identifier . '_batch_*' );
 
-			if ( is_multisite() ) {
-				$table        = $wpdb->sitemeta;
-				$column       = 'meta_key';
-				$key_column   = 'meta_id';
-				$value_column = 'meta_value';
-			}
+			$batch = [];
 
-			$key = $wpdb->esc_like( $this->identifier . '_batch_' ) . '%';
-
-			$query = $wpdb->get_row( $wpdb->prepare( "
-			SELECT *
-			FROM {$table}
-			WHERE {$column} LIKE %s
-			ORDER BY {$key_column} ASC
-			LIMIT 1
-		", $key ) );
-
-			$batch       = new stdClass();
-			$batch->key  = $query->$column;
-			$batch->data = maybe_unserialize( $query->$value_column );
+			$batch['key']  = $arList[0];
+			$batch['data'] = json_decode( $this->redis_client->get( $arList[0] ), true ); // Force pure arrays to avoid possible issues with encode/decode in php
 
 			return $batch;
 		}
@@ -299,28 +318,29 @@ if ( ! class_exists( 'WP_Background_Process' ) ) {
 			do {
 				$batch = $this->get_batch();
 
-				foreach ( $batch->data as $key => $value ) {
+				foreach ( $batch['data'] as $key => $value ) {
+					// Important - cast the array as an object
 					$task = $this->task( $value );
 
 					if ( false !== $task ) {
-						$batch->data[ $key ] = $task;
+						$batch['data'][ $key ] = $task;
 					} else {
-						unset( $batch->data[ $key ] );
+						unset( $batch['data'][ $key ] );
 					}
 
-					if ( $this->time_exceeded() || $this->memory_exceeded() ) {
+					if ( $this->time_exceeded() ) { // || $this->memory_exceeded()
 						// Batch limits reached.
 						break;
 					}
 				}
 
 				// Update or delete current batch.
-				if ( ! empty( $batch->data ) ) {
-					$this->update( $batch->key, $batch->data );
+				if ( ! empty( $batch['data'] ) ) {
+					$this->update( $batch['key'], $batch['data'] );
 				} else {
-					$this->delete( $batch->key );
+					$this->delete( $batch['key'] );
 				}
-			} while ( ! $this->time_exceeded() && ! $this->memory_exceeded() && ! $this->is_queue_empty() );
+			} while ( ! $this->time_exceeded() && ! $this->is_queue_empty() );
 
 			$this->unlock_process();
 
@@ -406,14 +426,14 @@ if ( ! class_exists( 'WP_Background_Process' ) ) {
 		}
 
 		/**
-		 * Schedule cron healthcheck
+		 * Schedule cron healthcheck - 2 minutes by default
 		 *
 		 * @access public
 		 * @param mixed $schedules Schedules.
 		 * @return mixed
 		 */
 		public function schedule_cron_healthcheck( $schedules ) {
-			$interval = apply_filters( $this->identifier . '_cron_interval', 5 );
+			$interval = apply_filters( $this->identifier . '_cron_interval', 2 );
 
 			if ( property_exists( $this, 'cron_interval' ) ) {
 				$interval = apply_filters( $this->identifier . '_cron_interval', $this->cron_interval );
@@ -475,7 +495,6 @@ if ( ! class_exists( 'WP_Background_Process' ) ) {
 		 * Cancel Process
 		 *
 		 * Stop processing queue items, clear cronjob and delete batch.
-		 *
 		 */
 		public function cancel_process() {
 			if ( ! $this->is_queue_empty() ) {
@@ -488,6 +507,7 @@ if ( ! class_exists( 'WP_Background_Process' ) ) {
 
 		}
 
+	
 		/**
 		 * Task
 		 *

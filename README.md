@@ -1,10 +1,10 @@
-# WP Background Processing
+# WP Background Processing with Redis
 
-WP Background Processing can be used to fire off non-blocking asynchronous requests or as a background processing tool, allowing you to queue tasks. Check out the [example plugin](https://github.com/A5hleyRich/wp-background-processing-example) or read the [accompanying article](https://deliciousbrains.com/background-processing-wordpress/).
+WP Background Processing can be used to fire off non-blocking asynchronous requests or as a background processing tool, allowing you to queue tasks with Redis.
 
-Inspired by [TechCrunch WP Asynchronous Tasks](https://github.com/techcrunch/wp-async-task).
+Forked from [A5hleyRich WP Background Processing ](https://github.com/A5hleyRich/wp-background-processing).
 
-__Requires PHP 5.2+__
+__Requires PHP 7+__
 
 ### Async Request
 
@@ -59,9 +59,11 @@ Chaining is also supported:
 
 `$this->example_request->data( array( 'data' => $data ) )->dispatch();`
 
-### Background Process
+### Background Process with Redis
 
 Background processes work in a similar fashion to async requests but they allow you to queue tasks. Items pushed onto the queue will be processed in the background once the queue has been dispatched. Queues will also scale based on available server resources, so higher end servers will process more items per batch. Once a batch has completed the next batch will start instantly.
+
+Enter your `Redis` connections in the class constructor `WP_Background_Process`.
 
 Health checks run by default every 5 minutes to ensure the queue is running when queued items exist. If the queue has failed it will be restarted.
 
